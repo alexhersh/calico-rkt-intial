@@ -23,12 +23,6 @@ print_stderr = functools.partial(print, file=sys.stderr)
 # PROFILE_LABEL = 'CALICO_PROFILE'
 # ETCD_PROFILE_PATH = '/calico/'
 RKT_ORCHESTRATOR = 'rkt'
-INTERFACE_NAME = 'eth0'
-
-ETCD_AUTHORITY_ENV = "ETCD_AUTHORITY"
-if ETCD_AUTHORITY_ENV not in os.environ:
-    os.environ[ETCD_AUTHORITY_ENV] = 'kubernetes-master:6666'
-print_stderr("Using ETCD_AUTHORITY=%s" % os.environ[ETCD_AUTHORITY_ENV])
 
 def main():
     print_stderr('Args: ', sys.argv)
@@ -43,11 +37,7 @@ def main():
         print_stderr('No initialization work to perform')
     elif mode == 'ADD':
         print_stderr('Executing Calico pod-creation plugin')
-        NetworkPlugin().add(
-            pod_id=os.environ['CNI_PODID'],
-            netns_path=os.environ['CNI_NETNS'],
-            ip='192.168.0.111',
-        )
+        NetworkPlugin().add()
     elif mode == 'teardown':
         print_stderr('No pod-deletion work to perform')
 
@@ -55,30 +45,34 @@ class NetworkPlugin(object):
 
     def __init__(self):
         self._datastore_client = datastore.DatastoreClient()
+        self.pod_id=os.environ['CNI_CONTAINERID']
+        self.netns_path=os.environ['CNI_NETNS']
+        self.interface=os.environ['CNI_IFNAME']
+        self.ip='192.168.0.111'
 
-    def add(pod_id, netns_path, ip):
+    def add(self):
         """"Handle rkt pod-add event."""
-        print_stderr('Configuring pod %s' % pod_id, file=sys.stderr)
+        print_stderr('Configuring pod %s' % self.pod_id, file=sys.stderr)
 
         try:
-            endpoint = self._create_calico_endpoint(pod_id, ip, netns_path)
-            self._create_profile(endpoint=endpoint, profile_name=pod_id)
+            endpoint = self._create_calico_endpoint()
+            self._create_profile(endpoint=endpoint, profile_name=self.pod_id)
         except CalledProcessError as e:
             print_stderr('Error code %d creating pod networking: %s\n%s' % (
                 e.returncode, e.output, e))
             sys.exit(1)
 
-    def _create_calico_endpoint(pod_id, ip, netns_path):
+    def _create_calico_endpoint(self):
         """Configure the Calico interface for a pod."""
         print_stderr('Configuring Calico networking.', file=sys.stderr)
         endpoint = self._datastore_client.create_endpoint(socket.gethostname(), RKT_ORCHESTRATOR,
-                                          pod_id, [IPAddress(ip)])
-        endpoint.provision_veth(Namespace(netns_path), INTERFACE_NAME)
+                                          self.pod_id, [IPAddress(self.ip)])
+        endpoint.provision_veth(Namespace(self.netns_path), self.interface)
         self._datastore_client.set_endpoint(endpoint)
         print_stderr('Finished configuring network interface', file=sys.stderr)
         return endpoint
 
-    def _create_profile(endpoint, profile_name):
+    def _create_profile(self, endpoint, profile_name):
         """
         Configure the calico profile for a pod.
 
@@ -103,11 +97,11 @@ class NetworkPlugin(object):
         print(json.dumps(
             {
                 'ip4': {
-                    'ip': '192.168.0.111/24'
+                    'ip': '%s/24' % self.ip
                 }
             }))
 
-    def _create_rules(id_):
+    def _create_rules(self, id_):
         rules_dict = {
             'id': id_,
             'inbound_rules': [
