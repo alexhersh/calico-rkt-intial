@@ -28,7 +28,7 @@ INTERFACE_NAME = 'eth0'
 ETCD_AUTHORITY_ENV = "ETCD_AUTHORITY"
 if ETCD_AUTHORITY_ENV not in os.environ:
     os.environ[ETCD_AUTHORITY_ENV] = 'kubernetes-master:6666'
-print("Using ETCD_AUTHORITY=%s" % os.environ[ETCD_AUTHORITY_ENV])
+print_stderr("Using ETCD_AUTHORITY=%s" % os.environ[ETCD_AUTHORITY_ENV])
 
 def main():
     print_stderr('Args: ', sys.argv)
@@ -54,11 +54,10 @@ def main():
 class NetworkPlugin(object):
 
     def __init__(self):
-        self._datastore_client = DatastoreClient()
+        self._datastore_client = datastore.DatastoreClient()
 
     def add(pod_id, netns_path, ip):
         """"Handle rkt pod-add event."""
-        self._datastore_client = datastore.DatastoreClient()
         print_stderr('Configuring pod %s' % pod_id, file=sys.stderr)
 
         try:
