@@ -10,7 +10,7 @@ import os
 import sys
 from subprocess import check_output, CalledProcessError
 from pycalico.datastore_datatypes import Rules
-from pycalico.netns import NamedNamespace as Namespace
+from pycalico.netns import Namespace
 
 print_stderr = functools.partial(print, file=sys.stderr)
 
