@@ -1,17 +1,18 @@
 #!/usr/bin/env python
 from __future__ import print_function
 import socket
-from netaddr import IPAddress
-
-from pycalico import datastore, netns
 import functools
 import json
 import os
 import sys
-from subprocess import check_output, CalledProcessError
-from pycalico.datastore_datatypes import Rules
+from netaddr import IPAddress, AddrFormatError
+from pycalico import netns
+from pycalico.ipam import IPAMClient
 from pycalico.netns import Namespace
 from pycalico.util import generate_cali_interface_name, get_host_ips
+from pycalico.datastore_datatypes import Rules
+from pycalico.datastore import IF_PREFIX, DatastoreClient
+from pycalico.datastore_errors import PoolNotFound
 
 print_stderr = functools.partial(print, file=sys.stderr)
 
@@ -55,7 +56,7 @@ def create(container_id, ip):
     """"Handle rkt pod-create event."""
     print_stderr('Configuring pod %s' % container_id, file=sys.stderr)
     netns_path='%s/%s/%s' % (NETNS_ROOT, container_id, os.environ['CNI_NETNS'])
-    _datastore_client = datastore.DatastoreClient()
+    _datastore_client = IPAMClient()
 
     try:
         endpoint = _create_calico_endpoint(container_id=container_id, 
@@ -77,10 +78,13 @@ def delete(container_id):
     """Cleanup after a pod."""
     print_stderr('Deleting pod %s' % container_id, file=sys.stderr)
 
-    _datastore_client = datastore.DatastoreClient()
+    _datastore_client = IPAMClient()
 
     # Remove the profile for the workload.
-    _container_remove(HOSTNAME, ORCHESTRATOR_ID)
+    _container_remove(hostname=HOSTNAME,
+                        orchestrator_id=ORCHESTRATOR_ID,
+                        container_id=container_id,
+                        client=_datastore_client)
 
     # Delete profile
     try:
@@ -101,13 +105,13 @@ def _create_calico_endpoint(container_id, ip, netns_path, client):
     print_stderr('Finished configuring network interface', file=sys.stderr)
     return endpoint
 
-def _container_remove(hostname, orchestrator_id):
+def _container_remove(hostname, orchestrator_id, container_id, client):
     """
     Remove the indicated container on this host from Calico networking
     """
     # Find the endpoint ID. We need this to find any ACL rules
     try:
-        endpoint = _datastore_client.get_endpoint(
+        endpoint = client.get_endpoint(
             hostname=hostname,
             orchestrator_id=orchestrator_id,
             workload_id=container_id
@@ -119,13 +123,13 @@ def _container_remove(hostname, orchestrator_id):
     # Remove any IP address assignments that this endpoint has
     for net in endpoint.ipv4_nets | endpoint.ipv6_nets:
         assert(net.size == 1)
-        _datastore_client.unassign_address(None, net.ip)
+        client.unassign_address(None, net.ip)
 
     # Remove the endpoint
     netns.remove_veth(endpoint.name)
 
     # Remove the container from the datastore.
-    _datastore_client.remove_workload(hostname, orchestrator_id, container_id)
+    client.remove_workload(hostname, orchestrator_id, container_id)
 
     print_stderr("Removed Calico interface from %s" % container_id)
 
