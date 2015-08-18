@@ -5,11 +5,12 @@ import functools
 import json
 import os
 import sys
-from netaddr import IPAddress, AddrFormatError
+from subprocess import check_output, CalledProcessError, check_call
+
+from netaddr import IPAddress, IPNetwork, AddrFormatError
 from pycalico import netns
-from pycalico.ipam import IPAMClient
+from pycalico.ipam import IPAMClient, SequentialAssignment
 from pycalico.netns import Namespace
-from pycalico.util import generate_cali_interface_name, get_host_ips
 from pycalico.datastore_datatypes import Rules
 from pycalico.datastore import IF_PREFIX, DatastoreClient
 from pycalico.datastore_errors import PoolNotFound
@@ -18,10 +19,10 @@ print_stderr = functools.partial(print, file=sys.stderr)
 
 # Append to existing env, to avoid losing PATH etc.
 # TODO-PAT: This shouldn't be hardcoded
-# env = os.environ.copy()
-# env['ETCD_AUTHORITY'] = 'localhost:2379'
+env = os.environ.copy()
+ETCD_AUTHORITY_ENV = 'ETCD_AUTHORITY'
+env[ETCD_AUTHORITY_ENV] = 'localhost:2379'
 
-# ETCD_AUTHORITY_ENV = "ETCD_AUTHORITY"
 # PROFILE_LABEL = 'CALICO_PROFILE'
 # ETCD_PROFILE_PATH = '/calico/'
 
@@ -31,32 +32,34 @@ NETNS_ROOT= '/var/lib/rkt/pods/run'
 
 def main():
     print_stderr('Args: ', sys.argv)
-    print_stderr('Env: ', os.environ)
+    print_stderr('Env: ', env)
     input_ = ''.join(sys.stdin.readlines()).replace('\n', '')
     print_stderr('Input: ', input_)
     input_json = json.loads(input_)
 
-    mode = os.environ['CNI_COMMAND']
+    mode = env['CNI_COMMAND']
 
     if mode == 'init':
         print_stderr('No initialization work to perform')
     elif mode == 'ADD':
         print_stderr('Executing Calico pod-creation plugin')
         create(
-            container_id=os.environ['CNI_CONTAINERID'],
-            ip='192.168.0.111'
+            container_id=env['CNI_CONTAINERID'],
+            pool=input_json['ipam']['subnet']
             )
     elif mode == 'DEL':
         print_stderr('Executing Calico pod-deletion plugin')
         delete(
-            container_id=os.environ['CNI_CONTAINERID']
+            container_id=env['CNI_CONTAINERID']
             )
 
-def create(container_id, ip):
+def create(container_id, pool):
     """"Handle rkt pod-create event."""
     print_stderr('Configuring pod %s' % container_id, file=sys.stderr)
-    netns_path='%s/%s/%s' % (NETNS_ROOT, container_id, os.environ['CNI_NETNS'])
+    netns_path='%s/%s/%s' % (NETNS_ROOT, container_id, env['CNI_NETNS'])
     _datastore_client = IPAMClient()
+
+    ip=_allocate_IP(IPNetwork(pool))
 
     try:
         endpoint = _create_calico_endpoint(container_id=container_id, 
@@ -96,14 +99,65 @@ def _create_calico_endpoint(container_id, ip, netns_path, client):
     """Configure the Calico interface for a pod."""
     print_stderr('Configuring Calico networking.', file=sys.stderr)
 
-    interface = os.environ['CNI_IFNAME']
+    interface = env['CNI_IFNAME']
 
-    endpoint = client.create_endpoint(HOSTNAME, ORCHESTRATOR_ID,
-                                      container_id, [IPAddress(ip)])
-    endpoint.provision_veth(Namespace(netns_path), interface)
-    client.set_endpoint(endpoint)
+    endpoint = _container_add(hostname=HOSTNAME,
+                                orchestrator_id=ORCHESTRATOR_ID,
+                                container_id=container_id,
+                                ip=IPAddress(ip),
+                                netns_path=netns_path,
+                                interface=interface,
+                                client=client)
     print_stderr('Finished configuring network interface', file=sys.stderr)
     return endpoint
+
+def _container_add(hostname, orchestrator_id, container_id, ip, netns_path, interface, client):
+    """
+    Add a container to Calico networking with the given IP
+    Return Endpoint object
+    """
+    try:
+        _ = client.get_endpoint(
+            hostname=hostname,
+            orchestrator_id=orchestrator_id,
+            workload_id=container_id
+        )
+    except KeyError:
+        # Calico doesn't know about this container.  Continue.
+        pass
+    else:
+        print_stderr("This container has already been configured with Calico Networking.")
+        sys.exit(1)
+
+    # Assign ip address through IPAM Client
+    try:
+        ip_assigned = client.assign_address(None, ip)
+    except PoolNotFound:
+        print_stderr("ERROR: IP address %s does not belong to any configured pools."\
+              " Exiting." % ip)
+        sys.exit(1)
+    else:
+        if not ip_assigned:
+           print_stderr("ERROR: Failed to assign IP address %s. Exiting." % ip)
+           sys.exit(1)
+
+    # Create Endpoint object
+    try:
+        ep = client.create_endpoint(HOSTNAME, ORCHESTRATOR_ID,
+                                      container_id, [IPAddress(ip)])
+    except AddrFormatError:
+        print_stderr("This node is not configured for IPv%d. Unassigning IP "\
+                      "address %s then exiting."  % ip.version, ip)
+        client.unassign_address(None, ip)
+        sys.exit(1)
+
+    # Create the veth, move into the container namespace, add the IP and
+    # set up the default routes.
+    ep.mac = ep.provision_veth(Namespace(netns_path), interface)
+    client.set_endpoint(ep)
+
+    # Let the caller know what endpoint was created.
+    return ep
 
 def _container_remove(hostname, orchestrator_id, container_id, client):
     """
@@ -155,12 +209,13 @@ def _create_profile(endpoint, profile_name, ip, client):
         [profile_name], endpoint_id=endpoint.endpoint_id
     )
     print_stderr("Finished configuring profile.")
-    print(json.dumps(
+    dump = json.dumps(
         {
             "ip4": {
                 "ip": "%s/24" % ip
             }
-        }))
+        })
+    print(dump)
 
 def _create_rules(id_):
     rules_dict = {
@@ -196,6 +251,12 @@ def _apply_rules(profile_name, client):
     profile.rules = _create_rules(profile_name)
     client.profile_update_rules(profile)
     print_stderr("Finished applying rules.")
+
+def _allocate_IP(pool):
+    """
+    Determin
+    """
+    return SequentialAssignment().allocate(pool)
 
 if __name__ == '__main__':
     main()
