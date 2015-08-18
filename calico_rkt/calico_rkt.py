@@ -41,147 +41,157 @@ def main():
         print_stderr('No initialization work to perform')
     elif mode == 'ADD':
         print_stderr('Executing Calico pod-creation plugin')
-        NetworkPlugin().create()
-    elif mode == 'DELETE':
-        print_stderr('Executing Calico pod-deletion plugin')
-        NetworkPlugin().delete()
-
-class NetworkPlugin(object):
-
-    def __init__(self):
-        self._datastore_client = datastore.DatastoreClient()
-        self.pod_id=os.environ['CNI_CONTAINERID']
-        self.netns_path='%s/%s/%s' % (NETNS_ROOT, self.pod_id, os.environ['CNI_NETNS'])
-        self.interface=os.environ['CNI_IFNAME']
-        self.ip='192.168.0.111'
-
-    def create(self):
-        """"Handle rkt pod-create event."""
-        print_stderr('Configuring pod %s' % self.pod_id, file=sys.stderr)
-
-        try:
-            endpoint = self._create_calico_endpoint()
-            self._create_profile(endpoint=endpoint, profile_name=self.pod_id)
-        except CalledProcessError as e:
-            print_stderr('Error code %d creating pod networking: %s\n%s' % (
-                e.returncode, e.output, e))
-            sys.exit(1)
-        print_stderr('Finished Creating pod %s' % self.pod_id)    
-
-    def delete(self):
-        """Cleanup after a pod."""
-        print_stderr('Deleting pod %s' % self.pod_id, file=sys.stderr)
-
-        # Remove the profile for the workload.
-        self._container_remove(HOSTNAME, ORCHESTRATOR_ID)
-
-        # Delete profile
-        try:
-            self._datastore_client.remove_profile(self.pod_id)
-        except:
-            print_stderr("Cannot remove profile %s; Profile cannot be found." % self.profile_name)
-
-    def _create_calico_endpoint(self):
-        """Configure the Calico interface for a pod."""
-        print_stderr('Configuring Calico networking.', file=sys.stderr)
-        endpoint = self._datastore_client.create_endpoint(HOSTNAME, ORCHESTRATOR_ID,
-                                          self.pod_id, [IPAddress(self.ip)])
-        endpoint.provision_veth(Namespace(self.netns_path), self.interface)
-        self._datastore_client.set_endpoint(endpoint)
-        print_stderr('Finished configuring network interface', file=sys.stderr)
-        return endpoint
-
-    def _container_remove(self, hostname, orchestrator_id):
-        """
-        Remove the indicated container on this host from Calico networking
-        """
-        # Find the endpoint ID. We need this to find any ACL rules
-        try:
-            endpoint = self._datastore_client.get_endpoint(
-                hostname=hostname,
-                orchestrator_id=orchestrator_id,
-                workload_id=self.pod_id
+        create(
+            container_id=os.environ['CNI_CONTAINERID'],
+            ip='192.168.0.111'
             )
-        except KeyError:
-            print_stderr("Container %s doesn't contain any endpoints" % self.pod_id)
-            sys.exit(1)
+    elif mode == 'DEL':
+        print_stderr('Executing Calico pod-deletion plugin')
+        delete(
+            container_id=os.environ['CNI_CONTAINERID']
+            )
 
-        # Remove any IP address assignments that this endpoint has
-        for net in endpoint.ipv4_nets | endpoint.ipv6_nets:
-            assert(net.size == 1)
-            self._datastore_client.unassign_address(None, net.ip)
+def create(container_id, ip):
+    """"Handle rkt pod-create event."""
+    print_stderr('Configuring pod %s' % container_id, file=sys.stderr)
+    netns_path='%s/%s/%s' % (NETNS_ROOT, container_id, os.environ['CNI_NETNS'])
+    _datastore_client = datastore.DatastoreClient()
 
-        # Remove the endpoint
-        netns.remove_veth(endpoint.name)
+    try:
+        endpoint = _create_calico_endpoint(container_id=container_id, 
+                                            ip=ip, 
+                                            netns_path=netns_path,
+                                            client=_datastore_client)
 
-        # Remove the container from the datastore.
-        self._datastore_client.remove_workload(hostname, orchestrator_id, self.pod_id)
+        _create_profile(endpoint=endpoint, 
+                        profile_name=container_id, 
+                        ip=ip,
+                        client=_datastore_client)
+    except CalledProcessError as e:
+        print_stderr('Error code %d creating pod networking: %s\n%s' % (
+            e.returncode, e.output, e))
+        sys.exit(1)
+    print_stderr('Finished Creating pod %s' % container_id)    
 
-        print_stderr("Removed Calico interface from %s" % self.pod_id)
+def delete(container_id):
+    """Cleanup after a pod."""
+    print_stderr('Deleting pod %s' % container_id, file=sys.stderr)
 
-    def _create_profile(self, endpoint, profile_name):
-        """
-        Configure the calico profile for a pod.
+    _datastore_client = datastore.DatastoreClient()
 
-        Currently assumes one pod with each name.
-        """
-        print_stderr('Configuring Pod Profile: %s' % profile_name)
+    # Remove the profile for the workload.
+    _container_remove(HOSTNAME, ORCHESTRATOR_ID)
 
-        if self._datastore_client.profile_exists(profile_name):
-            print_stderr("Error: Profile with name %s already exists, exiting." % profile_name)
-            sys.exit(1)
+    # Delete profile
+    try:
+        _datastore_client.remove_profile(container_id)
+    except:
+        print_stderr("Cannot remove profile %s; Profile cannot be found." % container_id)
 
-        self._datastore_client.create_profile(profile_name)
-        self._apply_rules(profile_name)
+def _create_calico_endpoint(container_id, ip, netns_path, client):
+    """Configure the Calico interface for a pod."""
+    print_stderr('Configuring Calico networking.', file=sys.stderr)
 
-        # Also set the profile for the workload.
-        print_stderr('Setting profile %s on endpoint %s' %
-                     (profile_name, endpoint.endpoint_id))
-        self._datastore_client.set_profiles_on_endpoint(
-            [profile_name], endpoint_id=endpoint.endpoint_id
+    interface = os.environ['CNI_IFNAME']
+
+    endpoint = client.create_endpoint(HOSTNAME, ORCHESTRATOR_ID,
+                                      container_id, [IPAddress(ip)])
+    endpoint.provision_veth(Namespace(netns_path), interface)
+    client.set_endpoint(endpoint)
+    print_stderr('Finished configuring network interface', file=sys.stderr)
+    return endpoint
+
+def _container_remove(hostname, orchestrator_id):
+    """
+    Remove the indicated container on this host from Calico networking
+    """
+    # Find the endpoint ID. We need this to find any ACL rules
+    try:
+        endpoint = _datastore_client.get_endpoint(
+            hostname=hostname,
+            orchestrator_id=orchestrator_id,
+            workload_id=container_id
         )
-        print_stderr("Finished configuring profile.")
-        print_stderr(json.dumps(
+    except KeyError:
+        print_stderr("Container %s doesn't contain any endpoints" % container_id)
+        sys.exit(1)
+
+    # Remove any IP address assignments that this endpoint has
+    for net in endpoint.ipv4_nets | endpoint.ipv6_nets:
+        assert(net.size == 1)
+        _datastore_client.unassign_address(None, net.ip)
+
+    # Remove the endpoint
+    netns.remove_veth(endpoint.name)
+
+    # Remove the container from the datastore.
+    _datastore_client.remove_workload(hostname, orchestrator_id, container_id)
+
+    print_stderr("Removed Calico interface from %s" % container_id)
+
+def _create_profile(endpoint, profile_name, ip, client):
+    """
+    Configure the calico profile for a pod.
+
+    Currently assumes one pod with each name.
+    """
+    print_stderr('Configuring Pod Profile: %s' % profile_name)
+
+    if client.profile_exists(profile_name):
+        print_stderr("Error: Profile with name %s already exists, exiting." % profile_name)
+        sys.exit(1)
+
+    client.create_profile(profile_name)
+    _apply_rules(profile_name, client)
+
+    # Also set the profile for the workload.
+    print_stderr('Setting profile %s on endpoint %s' %
+                 (profile_name, endpoint.endpoint_id))
+    client.set_profiles_on_endpoint(
+        [profile_name], endpoint_id=endpoint.endpoint_id
+    )
+    print_stderr("Finished configuring profile.")
+    print(json.dumps(
+        {
+            "ip4": {
+                "ip": "%s/24" % ip
+            }
+        }))
+
+def _create_rules(id_):
+    rules_dict = {
+        "id": id_,
+        "inbound_rules": [
             {
-                "ip4": {
-                    "ip": "%s/24" % self.ip
-                }
-            }))
+                "action": "allow",
+            },
+        ],
+        "outbound_rules": [
+            {
+                "action": "allow",
+            },
+        ],
+    }
+    rules_json = json.dumps(rules_dict, indent=2)
+    rules = Rules.from_json(rules_json)
+    return rules
 
-    def _create_rules(self, id_):
-        rules_dict = {
-            "id": id_,
-            "inbound_rules": [
-                {
-                    "action": "allow",
-                },
-            ],
-            "outbound_rules": [
-                {
-                    "action": "allow",
-                },
-            ],
-        }
-        rules_json = json.dumps(rules_dict, indent=2)
-        rules = Rules.from_json(rules_json)
-        return rules
+def _apply_rules(profile_name, client):
+    """
+    Generate a new profile with the default "allow all" rules.
+    :param profile_name: The profile to update
+    :type profile_name: string
+    :return:
+    """
+    try:
+        profile = client.get_profile(profile_name)
+    except:
+        print_stderr("Error: Could not apply rules. Profile not found: %s, exiting" % profile_name)
+        sys.exit(1)
 
-    def _apply_rules(self, profile_name):
-        """
-        Generate a new profile with the default "allow all" rules.
-        :param profile_name: The profile to update
-        :type profile_name: string
-        :return:
-        """
-        try:
-            profile = self._datastore_client.get_profile(profile_name)
-        except:
-            print_stderr("Error: Could not apply rules. Profile not found: %s, exiting" % profile_name)
-            sys.exit(1)
-
-        profile.rules = self._create_rules(profile_name)
-        self._datastore_client.profile_update_rules(profile)
-        print_stderr("Finished applying rules.")
+    profile.rules = _create_rules(profile_name)
+    client.profile_update_rules(profile)
+    print_stderr("Finished applying rules.")
 
 if __name__ == '__main__':
     main()
