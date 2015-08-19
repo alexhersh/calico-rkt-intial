@@ -17,6 +17,10 @@ from pycalico.datastore_errors import PoolNotFound
 
 print_stderr = functools.partial(print, file=sys.stderr)
 
+
+input_ = ''.join(sys.stdin.readlines()).replace('\n', '')
+input_json = json.loads(input_)
+
 # Append to existing env, to avoid losing PATH etc.
 # TODO-PAT: This shouldn't be hardcoded
 env = os.environ.copy()
@@ -31,12 +35,6 @@ HOSTNAME = socket.gethostname()
 NETNS_ROOT= '/var/lib/rkt/pods/run'
 
 def main():
-    print_stderr('Args: ', sys.argv)
-    print_stderr('Env: ', env)
-    input_ = ''.join(sys.stdin.readlines()).replace('\n', '')
-    print_stderr('Input: ', input_)
-    input_json = json.loads(input_)
-
     mode = env['CNI_COMMAND']
 
     if mode == 'init':
@@ -44,8 +42,7 @@ def main():
     elif mode == 'ADD':
         print_stderr('Executing Calico pod-creation plugin')
         create(
-            container_id=env['CNI_CONTAINERID'],
-            pool=input_json['ipam']['subnet']
+            container_id=env['CNI_CONTAINERID']
             )
     elif mode == 'DEL':
         print_stderr('Executing Calico pod-deletion plugin')
@@ -53,17 +50,14 @@ def main():
             container_id=env['CNI_CONTAINERID']
             )
 
-def create(container_id, pool):
+def create(container_id):
     """"Handle rkt pod-create event."""
     print_stderr('Configuring pod %s' % container_id, file=sys.stderr)
     netns_path='%s/%s/%s' % (NETNS_ROOT, container_id, env['CNI_NETNS'])
     _datastore_client = IPAMClient()
 
-    ip=_allocate_IP(IPNetwork(pool))
-
     try:
-        endpoint = _create_calico_endpoint(container_id=container_id, 
-                                            ip=ip, 
+        endpoint, ip = _create_calico_endpoint(container_id=container_id,
                                             netns_path=netns_path,
                                             client=_datastore_client)
 
@@ -95,23 +89,22 @@ def delete(container_id):
     except:
         print_stderr("Cannot remove profile %s; Profile cannot be found." % container_id)
 
-def _create_calico_endpoint(container_id, ip, netns_path, client):
+def _create_calico_endpoint(container_id, netns_path, client):
     """Configure the Calico interface for a pod."""
     print_stderr('Configuring Calico networking.', file=sys.stderr)
 
     interface = env['CNI_IFNAME']
 
-    endpoint = _container_add(hostname=HOSTNAME,
+    endpoint, ip = _container_add(hostname=HOSTNAME,
                                 orchestrator_id=ORCHESTRATOR_ID,
                                 container_id=container_id,
-                                ip=IPAddress(ip),
                                 netns_path=netns_path,
                                 interface=interface,
                                 client=client)
     print_stderr('Finished configuring network interface', file=sys.stderr)
-    return endpoint
+    return endpoint, ip
 
-def _container_add(hostname, orchestrator_id, container_id, ip, netns_path, interface, client):
+def _container_add(hostname, orchestrator_id, container_id, netns_path, interface, client):
     """
     Add a container to Calico networking with the given IP
     Return Endpoint object
@@ -129,17 +122,8 @@ def _container_add(hostname, orchestrator_id, container_id, ip, netns_path, inte
         print_stderr("This container has already been configured with Calico Networking.")
         sys.exit(1)
 
-    # Assign ip address through IPAM Client
-    try:
-        ip_assigned = client.assign_address(None, ip)
-    except PoolNotFound:
-        print_stderr("ERROR: IP address %s does not belong to any configured pools."\
-              " Exiting." % ip)
-        sys.exit(1)
-    else:
-        if not ip_assigned:
-           print_stderr("ERROR: Failed to assign IP address %s. Exiting." % ip)
-           sys.exit(1)
+    # Allocate and Assign ip address through IPAM Client
+    ip = _allocate_IP()
 
     # Create Endpoint object
     try:
@@ -148,7 +132,7 @@ def _container_add(hostname, orchestrator_id, container_id, ip, netns_path, inte
     except AddrFormatError:
         print_stderr("This node is not configured for IPv%d. Unassigning IP "\
                       "address %s then exiting."  % ip.version, ip)
-        client.unassign_address(None, ip)
+        client.unassign_address(IPNetwork(input_json['ipam']['subnet']), ip)
         sys.exit(1)
 
     # Create the veth, move into the container namespace, add the IP and
@@ -157,7 +141,7 @@ def _container_add(hostname, orchestrator_id, container_id, ip, netns_path, inte
     client.set_endpoint(ep)
 
     # Let the caller know what endpoint was created.
-    return ep
+    return ep, ip
 
 def _container_remove(hostname, orchestrator_id, container_id, client):
     """
@@ -252,11 +236,14 @@ def _apply_rules(profile_name, client):
     client.profile_update_rules(profile)
     print_stderr("Finished applying rules.")
 
-def _allocate_IP(pool):
+def _allocate_IP():
     """
-    Determin
+    Determine next available IP for pool in input_ and assign it
     """
-    return SequentialAssignment().allocate(pool)
+    pool = input_json['ipam']['subnet']
+    candidate = SequentialAssignment().allocate(IPNetwork(pool))
+    print_stderr("Using IP %s" % candidate)
+    return candidate
 
 if __name__ == '__main__':
     main()
