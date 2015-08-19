@@ -62,7 +62,7 @@ def create(container_id):
                                             client=_datastore_client)
 
         _create_profile(endpoint=endpoint, 
-                        profile_name=container_id, 
+                        profile_name=input_json['name'], 
                         ip=ip,
                         client=_datastore_client)
     except CalledProcessError as e:
@@ -85,7 +85,7 @@ def delete(container_id):
 
     # Delete profile
     try:
-        _datastore_client.remove_profile(container_id)
+        _datastore_client.remove_profile(input_json['name'])
     except:
         print_stderr("Cannot remove profile %s; Profile cannot be found." % container_id)
 
@@ -180,11 +180,11 @@ def _create_profile(endpoint, profile_name, ip, client):
     print_stderr('Configuring Pod Profile: %s' % profile_name)
 
     if client.profile_exists(profile_name):
-        print_stderr("Error: Profile with name %s already exists, exiting." % profile_name)
-        sys.exit(1)
+        print_stderr("Profile with name %s already exists, applying to endpoint." % (profile_name))
 
-    client.create_profile(profile_name)
-    _apply_rules(profile_name, client)
+    else:
+        client.create_profile(profile_name)
+        # _apply_rules(profile_name, client)
 
     # Also set the profile for the workload.
     print_stderr('Setting profile %s on endpoint %s' %
